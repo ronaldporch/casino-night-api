@@ -47,6 +47,7 @@ let sendAllRecords = (socket, emit) => (err, cursor) => {
 }
 
 let sendChange = (socket, emit) => (err, cursor) => {
+  if (err) throw err
   cursor.each((err, result) => {
     if (err) throw err
     socket.emit(emit, result)
@@ -58,13 +59,67 @@ let messageSuccess = (socket, emit) => (err, result) => {
   socket.emit(emit)
 }
 
-io.of('/stream').on('connection', socket => {
+let readData = (socket, emit) => (err, result) => {
+  if (err) throw err
+  socket.emit(emit, result)
+}
+
+let readRecordFromArray = (socket, emit) => (err, cursor) => {
+  if (err) throw err
+  cursor.toArray((err, result) => {
+    if (err) throw err
+    let game = results[0]
+
+    socket.emit(emit, result[0])
+  })
+}
+
+io.on('connection', socket => {
   let db = 'casinonight',
     messages = r.db(db).table('messages')
+    users = r.db(db).table('users')
+    games = r.db(db).table('games')
 
+
+  socket.on('game.latest.get', () => {
+    games
+      .orderBy(r.desc('date'))
+      .limit(1).run(connection, (err, cursor) => {
+        if (err) throw err
+        cursor.toArray((err, result) => {
+          if (err) throw err
+          let game = result[0]
+          games
+            .get(game.id)
+            .changes()
+            .filter(r.row('new_val')('bets').count().gt(r.row('old_val')('bets').count()))
+            .run(connection, sendChange(socket, 'game.latest.bets.update'))
+          socket.emit('game.latest.send', game)
+        })
+      })
+  })
+  socket.on('user.get', user => {
+    users.get(user.id).run(connection, readData(socket, 'user.send'))
+    users.get(user.id).changes().run(connection, sendChange(socket, 'user.update'))
+  })
+
+  socket.on('game.latest.bet.send', bet => {
+    let user = users.get(bet.bet.userId)
+    user('money').ge(bet.bet.amount).run(connection, (err, hasTheCash) => {
+      if (err) throw err
+      if (hasTheCash) {
+        user.update({money: r.row('money').sub(bet.bet.amount)}).run(connection, (err) => {
+          games.get(bet.gameId).update({
+            bets: r.row("bets").append(bet.bet)
+          }).run(connection, messageSuccess(socket, 'bet.success'))
+        })
+      }
+    })
+  })
+
+  // Examples
   messages.run(connection, sendAllRecords(socket, 'messages'))
   messages.changes().run(connection, sendChange(socket, 'messages.update'))
-
   socket.on('message.send', message => {
     message.date = new Date()
     messages.insert(message).run(connection, messageSuccess(socket, 'message.success'))
