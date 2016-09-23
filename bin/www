@@ -79,7 +79,38 @@ io.on('connection', socket => {
     users = r.db(db).table('users')
     games = r.db(db).table('games')
 
+  let decrementTime = function (id) {
+    games.get(id)('timeLeft').eq(0).not().run(connection, (err, hasTimeLeft) => {
+      if (err) throw err
+      let options = { returnChanges: true }
+      let update = (hasTimeLeft)
+        ? { timeLeft: r.row('timeLeft').sub(1) }
+        : { bettingOpen: false }
+      games.get(id).update(update, options).run(connection, function (err, result) {
+        if (err) throw err
+        console.log(JSON.stringify(result, null, 1))
+        if (!hasTimeLeft) clearInterval(interval)
+      })
+    })
+  }
 
+  let thing = {
+    players: ["Mario", "Bowser", "Samus"],
+    timeLeft: 10,
+    date: new Date(),
+    bets: [],
+    bettingOpen: true
+  }
+  let options = {
+    returnChanges: true
+  }
+  games.insert(thing, options).run(connection, function (err, result) {
+    if (err) return err
+    console.log(result.changes[0].new_val)
+    // Start new timer for this game
+    interval = setInterval(decrementTime, 1000, result.changes[0].new_val.id)
+    games.get(result.changes[0].new_val.id).changes().run(connection, sendChange(socket, 'game.update'))
+  })
   socket.on('game.latest.get', () => {
     games
       .orderBy(r.desc('date'))
