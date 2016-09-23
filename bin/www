@@ -74,6 +74,8 @@ let readRecordFromArray = (socket, emit) => (err, cursor) => {
   })
 }
 
+intervals = []
+
 io.on('connection', socket => {
   let db = 'casinonight'
     users = r.db(db).table('users')
@@ -89,7 +91,7 @@ io.on('connection', socket => {
       games.get(id).update(update, options).run(connection, function (err, result) {
         if (err) throw err
         console.log(JSON.stringify(result, null, 1))
-        if (!hasTimeLeft) clearInterval(interval)
+        if (!hasTimeLeft) clearInterval(intervals[id])
       })
     })
   }
@@ -108,7 +110,7 @@ io.on('connection', socket => {
     if (err) return err
     console.log(result.changes[0].new_val)
     // Start new timer for this game
-    interval = setInterval(decrementTime, 1000, result.changes[0].new_val.id)
+    intervals[result.changes[0].new_val.id] = setInterval(decrementTime, 1000, result.changes[0].new_val.id)
     games.get(result.changes[0].new_val.id).changes().run(connection, sendChange(socket, 'game.update'))
   })
   socket.on('game.latest.get', () => {
