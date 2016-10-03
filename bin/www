@@ -28,6 +28,24 @@ var connection = null
 r.connect({ host: 'localhost', port: 28015 }, function (err, conn) {
   if (err) throw err
   connection = conn
+  r.dbList().contains('casinonight').run(connection, (err, databaseExists) => {
+    if (err) throw err
+    if (!databaseExists) {
+      r.dbCreate('casinonight').run(connection, err => {
+        if (err) throw err
+        let tables = [
+          'users',
+          'games'
+        ]
+        r.expr(tables).forEach(table => {
+          return r.db('casinonight').tableCreate(table)
+        }).run(connection, err => {
+          if (err) throw err
+          console.log(`Tables created!`)
+        })
+      })
+    }
+  })
 })
 
 /**
@@ -50,7 +68,7 @@ let options = {
   },
   identity: {
     username: 'casinonightbot',
-    password: 'password'
+    password: 'oauth:6rstziofxbpv358rxo12pdxfp42arg'
   },
   channels: ['dada5714']
 }
@@ -102,7 +120,7 @@ let db = 'casinonight'
   games = r.db(db).table('games')
 
 let decrementTime = function (id) {
-  games.get(id)('timeLeft').eq(0).not().run(connection, (err, hasTimeLeft) => {
+  games.get(id)('timeLeft').gt(0).run(connection, (err, hasTimeLeft) => {
     if (err) throw err
     let options = { returnChanges: true }
     let update = (hasTimeLeft)
@@ -110,7 +128,7 @@ let decrementTime = function (id) {
       : { bettingOpen: false }
     games.get(id).update(update, options).run(connection, function (err, result) {
       if (err) throw err
-      console.log(JSON.stringify(result, null, 1))
+      console.log(`Time Left for Bet: ${result.changes[0].new_val.timeLeft}`)
       if (!hasTimeLeft) {
         clearInterval(intervals[id])
         client.action('dada5714', `Betting Over! Let the games commence! FrankerZ`)
@@ -119,27 +137,33 @@ let decrementTime = function (id) {
   })
 }
 
-io.on('connection', socket => {
-
-  let thing = {
-    players: ["Mario", "Bowser", "Samus"],
-    timeLeft: 10,
-    date: new Date(),
-    bets: [],
-    bettingOpen: true
-  }
-
-  let options = {
-    returnChanges: true
-  }
-
-  games.insert(thing, options).run(connection, (err, result) => {
-    if (err) return err
-    currentBet = result.changes[0].new_val
-    // Start new timer for this game
-    intervals[currentBet.id] = setInterval(decrementTime, 1000, currentBet.id)
-    games.get(currentBet.id).changes().run(connection, sendChange(socket, 'game.update'))
+let startNewGame = (socket, game, options, channel) => {
+  games.insert(game, options).run(connection, (err, result) => {
+    throwError(err)
+    currentBet[channel] = result.changes[0].new_val
+    intervals[currentBet[channel].id] = setInterval(decrementTime, 1000, currentBet[channel].id)
+    if (socket) games.get(currentBet[channel].id).changes().run(connection, sendChange(socket, 'game.update'))
+    client.action('dada5714', `New game starting! Participants: ${currentBet[channel].players.join(', ')}. Type !signup if you aren't already a participant. Type !bet (character) (amount) to submit a bet.`)
   })
+}
+
+let throwError = (err) => {
+  if (err) throw err
+}
+
+io.on('connection', socket => {
+  socket.on('game.new', (game) => {
+    Object.assign(game, {
+      date: new Date(),
+      bets: [],
+      bettingOpen: true
+    })
+    let options = {
+      returnChanges: true
+    }
+    startNewGame(socket, game, options)
+  })
+
   socket.on('game.latest.get', () => {
     games
       .orderBy(r.desc('date'))
@@ -179,7 +203,7 @@ io.on('connection', socket => {
 
 // Twitchbot specific stuff
 
-currentBet = undefined
+currentBet = {}
 
 client.on('chat', (channel, user, message, self) => {
   if (message === '!help') {
@@ -189,31 +213,73 @@ client.on('chat', (channel, user, message, self) => {
 !help: Get list of commands.
     `)
   }
+  else if (`#${user.username}` === channel && message.search('!endgame') === 0 && message.search('!endgame') !== -1) {
+    let game = r.db('casinonight').table('games').get(currentBet[channel].id)
+    r.expr(game('bettingOpen').eq(false)).and(game('winner').eq(false)).run(connection, (err, canEnd) => {
+      if (err) throw err
+      if (canEnd) {
+        let update = {
+          winner: message.split(' ')[1]
+        }
+        let options = {
+          returnChanges: true
+        }
+        game.update(update, options).run(connection, (err, result) => {
+          if (err) throw err
+          let game = r.db('casinonight').table('games').get(currentBet[channel].id)
+          let options = {
+            returnChanges: true,
+            nonAtomic: true
+          }
+          game('bets').filter(bet => bet('player').eq(game('winner'))).forEach(bet => {
+            return users.get(bet('userId')).update(row => ({
+              'money': row('money').add(bet('amount').mul(game('players').count()))
+            }), options)
+          }).run(connection, (err, result) => {
+            if (err) throw err
+            console.log(result)
+          })
+        })
+      }
+    })
+  }
   else if (`#${user.username}` === channel && message.search('!newgame') === 0 && message.search('!newgame') !== -1) {
-    let messageParse = message.split(' ')
-    if (!isNaN(parseInt(messageParse[1]))
-      && typeof parseInt(messageParse[1]) === 'number'
-      && typeof messageParse[2] !== 'undefined'
-      && typeof messageParse[3] !== 'undefined'
-    ) {
-      let time = parseInt(messageParse[1])
-      messageParse.splice(0, 2)
-      let g = {
-        "bets": [ ],
-        "bettingOpen": true,
-        "date": new Date(),
-        "timeLeft": time,
-        "players": messageParse
+    let createNewThing = () => {
+      let messageParse = message.split(' ')
+      if (!isNaN(parseInt(messageParse[1]))
+        && typeof parseInt(messageParse[1]) === 'number'
+        && typeof messageParse[2] !== 'undefined'
+        && typeof messageParse[3] !== 'undefined'
+      ) {
+        let time = parseInt(messageParse[1])
+        messageParse.splice(0, 2)
+        let g = {
+          "bets": [],
+          "bettingOpen": true,
+          "date": new Date(),
+          "timeLeft": time,
+          "players": messageParse,
+          "winner": false
+        }
+        let o = {
+          returnChanges: true
+        }
+        startNewGame(undefined, g, o, channel)
       }
-      let o = {
-        returnChanges: true
-      }
-      games.insert(g, o).run(connection, function(err, game){
+    }
+    if (currentBet[channel]) {
+      let game = games.get(currentBet[channel].id)
+      r.expr(game('bettingOpen').eq(false)).and(game('winner').eq(false).not()).run(connection, (err, betClosed) => {
         if (err) throw err
-        currentBet = game.changes[0].new_val
-        intervals[currentBet.id] = setInterval(decrementTime, 1000, currentBet.id)
-        client.action('dada5714', `New game starting! Participants: ${currentBet.players.join(', ')}. Type !signup if you aren't already a participant. Type !bet (character) (amount) to submit a bet.`)
+        console.log(betClosed)
+        if (betClosed) {
+          createNewThing()
+        } else {
+          console.log('not closed yet!')
+        }
       })
+    } else {
+      createNewThing()
     }
   }
   else if (message.search('!signup') !== -1) {
@@ -250,16 +316,22 @@ client.on('chat', (channel, user, message, self) => {
             if (existingUser.money >= bet.amount) {
               users.get(existingUser.id).update({money: r.row('money').sub(bet.amount)}, { returnChanges: true }).run(connection, (err, changes) => {
                 bet.userId = existingUser.id
-                games.get(currentBet.id).update({
-                  bets: r.row("bets").append(bet)
-                }).run(connection, err => {
-                  if (err) throw err
-                  client.whisper(user['display-name'], `You placed a bet of $${bet.amount} for ${bet.player}. You currently have $${changes.changes[0].new_val.money}`)
-                })
+                if (currentBet[channel]) {
+                  games.get(currentBet[channel].id).update({
+                    bets: r.row("bets").append(bet)
+                  }).run(connection, err => {
+                    if (err) throw err
+                    client.whisper(user['display-name'], `You placed a bet of $${bet.amount} for ${bet.player}. You currently have $${changes.changes[0].new_val.money}`)
+                  })
+                } else {
+                  client.action('dada5714', `${user['display-name']} There isn't a bet going on right now!`)
+                }
               })
             } else {
               client.action('dada5714', `${user['display-name']} not enough money! Try winning a little more.`)
             }
+          } else {
+            client.action('dada5714', `${user['display-name']} you aren't part of the fun yet! Type !signup to join in.`)
           }
         })
       })
@@ -267,27 +339,7 @@ client.on('chat', (channel, user, message, self) => {
   }
 })
 client.on('connected', function (address, port) {
-    client.action('dada5714', `Casino Night Bot Activated. Welcome to Casino Night! Type !help for a list of commands.`)
-  // let g = {
-  //   "bets": [ ],
-  //   "bettingOpen": true,
-  //   "date": new Date(),
-  //   "players": [
-  //     "Mario",
-  //     "Bowser",
-  //     "Samus"
-  //   ] ,
-  //   "timeLeft": 120
-  // }
-  // let o = {
-  //   returnChanges: true
-  // }
-  // games.insert(g, o).run(connection, function(err, game){
-  //   if (err) throw err
-  //   currentBet = game.changes[0].new_val
-  //   intervals[currentBet.id] = setInterval(decrementTime, 1000, currentBet.id)
-  //   client.action('dada5714', `New game starting! Participants: ${currentBet.players.join(', ')}. Type !signup if you aren't already a participant. Type !bet (character) (amount) to submit a bet.`)
-  // })
+    client.action('dada5714', 'Casino Night Bot Activated. Welcome to Casino Night! Type !help for a list of commands.')
 })
 
 /**
